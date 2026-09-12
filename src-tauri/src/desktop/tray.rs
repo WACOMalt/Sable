@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -390,6 +392,17 @@ fn status_notifier_host_available() -> bool {
     dbus.name_has_owner(name).unwrap_or(false)
 }
 
+// Linux trays hand the StatusNotifierItem host a *path* to a PNG instead of the
+// pixels, and `tray-icon` writes that PNG to `$XDG_RUNTIME_DIR/tray-icon` by
+// default. Inside a sandbox that directory is private to the app, so the host
+// finds nothing to render and shows a blank slot. The app cache dir lives on the
+// real home directory, is already writable, and is readable by the host, so point
+// the icon there instead of widening the sandbox's filesystem permissions.
+#[cfg(target_os = "linux")]
+fn tray_icon_temp_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("tray-icon")
+}
+
 pub fn create_system_tray(app: &AppHandle<crate::BrowserEngine>) -> tauri::Result<()> {
     #[cfg(target_os = "linux")]
     if !appindicator_available() {
@@ -427,6 +440,11 @@ pub fn create_system_tray(app: &AppHandle<crate::BrowserEngine>) -> tauri::Resul
             }),
     );
 
+    #[cfg(target_os = "linux")]
+    if let Ok(cache_dir) = app.path().app_cache_dir() {
+        tray_builder = tray_builder.temp_dir_path(tray_icon_temp_dir(&cache_dir));
+    }
+
     if let Some(icon) = app.default_window_icon() {
         tray_builder = tray_builder.icon(icon.clone());
     }
@@ -462,6 +480,15 @@ mod tests {
             tray_available: false,
             toggle_window_shortcut: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tray_icon_is_written_under_the_app_cache_dir() {
+        // Anywhere but `$XDG_RUNTIME_DIR` so a sandboxed host can read the PNG.
+        let cache_dir = Path::new("/home/user/.var/app/moe.sable.client/cache");
+
+        assert_eq!(tray_icon_temp_dir(cache_dir), cache_dir.join("tray-icon"));
     }
 
     #[test]
