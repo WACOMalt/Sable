@@ -65,9 +65,9 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/SableClient/Sable/releases/latest/download/latest.json"
+        "https://github.com/WACOMalt/Sable/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM0NDc2QkI0NjdCODlEQUUKUldTdW5iaG50R3RIeFBQeGFwcDZNcGhCQ2Y4UFgzVnptRmNRZjRoVDl0MkdOZmREdC9pTUZrZnAK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJDQkFENEY1NzVCMDM2QTAKUldTZ05yQjE5ZFM2TEMyRWZFSzJnNCtHb25tWDc2WWlVUWxGc1FhZVR3V3Z5ZFJpTW5PcXlQcFUK"
     },
     "typegen": {
       "projectPath": ".",
