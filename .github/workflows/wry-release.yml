@@ -1,0 +1,179 @@
+# Fork-only release pipeline: builds Sable's WebKitGTK (wry) runtime for Linux
+# x86_64 and aarch64, signs the bundles with the fork's updater key, and publishes
+# them as a GitHub release with a latest.json for the in-app updater.
+#
+# Triggered by pushing a tag like `wry-v1.22.11`. The `wry-` prefix keeps it clear
+# of upstream's release workflows, which fire on `v*` tags.
+name: Wry Linux release
+
+on:
+  push:
+    tags: ['wry-v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wry-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: Build Linux ${{ matrix.arch }} (wry)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Same runners as upstream's Linux builds: glibc 2.35 keeps Debian 12
+          # and Ubuntu 22.04 supported.
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    env:
+      ARCH: ${{ matrix.arch }}
+      MISE_ENV: tauri
+      SABLE_BUILD_FLAVOR: stable
+      # linuxdeploy's bundled `strip` can't read newer ELF sections.
+      NO_STRIP: 'true'
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Derive version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#wry-v}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Tag $GITHUB_REF_NAME is not wry-vX.Y.Z"; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VITE_APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Require the signing key
+        shell: bash
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "::error::Secret TAURI_SIGNING_PRIVATE_KEY is not set"; exit 1; }
+
+      - name: Setup app
+        uses: ./.github/actions/setup
+        with:
+          tauri: 'true'
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          key: wry-${{ matrix.arch }}
+
+      - name: Stamp version into tauri.conf.json
+        shell: bash
+        run: node .github/scripts/set-tauri-version.mjs "$VERSION"
+
+      - name: Build bundles
+        shell: bash
+        run: pnpm tauri:wry build
+
+      - name: Sign bundles the bundler didn't sign
+        shell: bash
+        run: |
+          B=src-tauri/target/release/bundle
+          for f in $B/appimage/*.AppImage $B/deb/*.deb $B/rpm/*.rpm; do
+            if [ -e "$f" ] && [ ! -e "$f.sig" ]; then pnpm tauri signer sign "$f"; fi
+          done
+
+      - name: Assemble release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=src-tauri/target/release/bundle
+          P="Sable-${VERSION}-wry-linux-${ARCH}"
+          mkdir -p dist
+          for pair in "appimage:AppImage" "deb:deb" "rpm:rpm"; do
+            dir="${pair%%:*}"; ext="${pair##*:}"
+            src="$(ls "$B/$dir/"*."$ext" | head -1)"
+            cp "$src" "dist/$P.$ext"
+            cp "$src.sig" "dist/$P.$ext.sig"
+          done
+
+          # Same layout as the official tarball (sable + share/), minus CEF's runtime/.
+          T="$(mktemp -d)"
+          install -Dm755 src-tauri/target/release/sable "$T/sable"
+          mkdir -p "$T/share/applications"
+          printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=Sable' 'Comment=A Matrix client' \
+            'Exec=sable %U' 'Icon=sable' 'Terminal=false' 'Categories=Network;InstantMessaging;Chat;' \
+            'StartupWMClass=sable' 'MimeType=x-scheme-handler/sable;x-scheme-handler/moe.sable.app;' \
+            > "$T/share/applications/sable.desktop"
+          for size in 32x32 64x64 128x128; do
+            install -Dm644 "src-tauri/icons/${size}.png" "$T/share/icons/hicolor/${size}/apps/sable.png"
+          done
+          install -Dm644 src-tauri/icons/128x128@2x.png "$T/share/icons/hicolor/256x256/apps/sable.png"
+          tar -C "$T" -czf "dist/$P.tar.gz" sable share
+
+          echo "Highest glibc symbol required: $(objdump -T src-tauri/target/release/sable | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1)"
+          ls -l dist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Compose latest.json
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#wry-v}" python3 - <<'PY'
+          import datetime, json, os
+          version, tag = os.environ["VERSION"], os.environ["GITHUB_REF_NAME"]
+          base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{tag}"
+          platforms = {}
+          for arch in ("x86_64", "aarch64"):
+              for kind, ext in (("appimage", "AppImage"), ("deb", "deb"), ("rpm", "rpm")):
+                  name = f"Sable-{version}-wry-linux-{arch}.{ext}"
+                  entry = {"signature": open(f"dist/{name}.sig").read().strip(), "url": f"{base}/{name}"}
+                  platforms[f"linux-{arch}-{kind}"] = entry
+                  if kind == "appimage":
+                      # Fallback for installs without a recorded bundle type.
+                      platforms[f"linux-{arch}"] = entry
+          json.dump({
+              "version": version,
+              "notes": f"Unofficial WebKitGTK build of Sable {version} (H.264/AAC video fix).",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+              "platforms": platforms,
+          }, open("dist/latest.json", "w"), indent=2)
+          PY
+          cat dist/latest.json
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#wry-v}"
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@COMMIT@/${GITHUB_SHA::9}/g" \
+            .github/wry-release-notes.md > notes.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --latest \
+            --title "Sable $VERSION (unofficial WebKitGTK build: H.264 video fix)" \
+            --notes-file notes.md \
+            dist/*
