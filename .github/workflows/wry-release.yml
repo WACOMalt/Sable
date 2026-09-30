@@ -2,13 +2,19 @@
 # x86_64 and aarch64, signs the bundles with the fork's updater key, and publishes
 # them as a GitHub release with a latest.json for the in-app updater.
 #
-# Triggered by pushing a tag like `wry-v1.22.11`. The `wry-` prefix keeps it clear
-# of upstream's release workflows, which fire on `v*` tags.
+# Pushing a tag like `wry-v1.22.11` builds and publishes a release. The `wry-` prefix
+# keeps it clear of upstream's release workflows, which fire on `v*` tags.
+#
+# Pushes to the fork's default branch (and manual runs) build without publishing.
+# That doubles as a test build and keeps the Rust cache warm: tag runs can only
+# restore caches saved by their own tag or by the default branch.
 name: Wry Linux release
 
 on:
   push:
     tags: ['wry-v*']
+    branches: ['fix/linux-h264-video']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -45,11 +51,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Derive version from tag
+      - name: Derive version
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#wry-v}"
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Tag $GITHUB_REF_NAME is not wry-vX.Y.Z"; exit 1; }
+          if [[ "$GITHUB_REF" == refs/tags/wry-v* ]]; then
+            VERSION="${GITHUB_REF_NAME#wry-v}"
+          else
+            VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Version '$VERSION' is not X.Y.Z (tag: $GITHUB_REF_NAME)"; exit 1; }
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "VITE_APP_VERSION=$VERSION" >> "$GITHUB_ENV"
 
@@ -127,10 +137,12 @@ jobs:
           name: linux-${{ matrix.arch }}
           path: dist/
           if-no-files-found: error
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 90 || 7 }}
 
   release:
     name: Publish release
     needs: linux
+    if: startsWith(github.ref, 'refs/tags/wry-v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
