@@ -107,12 +107,12 @@ jobs:
           set -euo pipefail
           B=src-tauri/target/release/bundle
           P="Sable-${VERSION}-wry-linux-${ARCH}"
-          mkdir -p dist
+          mkdir -p release-files
           for pair in "appimage:AppImage" "deb:deb" "rpm:rpm"; do
             dir="${pair%%:*}"; ext="${pair##*:}"
             src="$(ls "$B/$dir/"*."$ext" | head -1)"
-            cp "$src" "dist/$P.$ext"
-            cp "$src.sig" "dist/$P.$ext.sig"
+            cp "$src" "release-files/$P.$ext"
+            cp "$src.sig" "release-files/$P.$ext.sig"
           done
 
           # Same layout as the official tarball (sable + share/), minus CEF's runtime/.
@@ -127,15 +127,15 @@ jobs:
             install -Dm644 "src-tauri/icons/${size}.png" "$T/share/icons/hicolor/${size}/apps/sable.png"
           done
           install -Dm644 src-tauri/icons/128x128@2x.png "$T/share/icons/hicolor/256x256/apps/sable.png"
-          tar -C "$T" -czf "dist/$P.tar.gz" sable share
+          tar -C "$T" -czf "release-files/$P.tar.gz" sable share
 
           echo "Highest glibc symbol required: $(objdump -T src-tauri/target/release/sable | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1)"
-          ls -l dist
+          ls -l release-files
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-${{ matrix.arch }}
-          path: dist/
+          path: release-files/
           if-no-files-found: error
           retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 90 || 7 }}
 
@@ -155,7 +155,7 @@ jobs:
         with:
           pattern: linux-*
           merge-multiple: true
-          path: dist
+          path: release-files
 
       - name: Compose latest.json
         shell: bash
@@ -168,7 +168,7 @@ jobs:
           for arch in ("x86_64", "aarch64"):
               for kind, ext in (("appimage", "AppImage"), ("deb", "deb"), ("rpm", "rpm")):
                   name = f"Sable-{version}-wry-linux-{arch}.{ext}"
-                  entry = {"signature": open(f"dist/{name}.sig").read().strip(), "url": f"{base}/{name}"}
+                  entry = {"signature": open(f"release-files/{name}.sig").read().strip(), "url": f"{base}/{name}"}
                   platforms[f"linux-{arch}-{kind}"] = entry
                   if kind == "appimage":
                       # Fallback for installs without a recorded bundle type.
@@ -178,9 +178,9 @@ jobs:
               "notes": f"Unofficial WebKitGTK build of Sable {version} (H.264/AAC video fix).",
               "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
               "platforms": platforms,
-          }, open("dist/latest.json", "w"), indent=2)
+          }, open("release-files/latest.json", "w"), indent=2)
           PY
-          cat dist/latest.json
+          cat release-files/latest.json
 
       - name: Create release
         shell: bash
@@ -194,4 +194,4 @@ jobs:
             --verify-tag --latest \
             --title "Sable $VERSION (unofficial WebKitGTK build: H.264 video fix)" \
             --notes-file notes.md \
-            dist/*
+            release-files/*
