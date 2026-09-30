@@ -63,11 +63,17 @@ jobs:
         with:
           tauri: 'true'
 
+      # The bundler copies xdg-mime into the AppImage; the ARM runner image lacks it.
+      - name: Install xdg-utils
+        shell: bash
+        run: command -v xdg-mime >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q xdg-utils; }
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
           key: wry-${{ matrix.arch }}
+          cache-on-failure: true
 
       - name: Stamp version into tauri.conf.json
         shell: bash
